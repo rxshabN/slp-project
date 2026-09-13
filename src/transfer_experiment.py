@@ -175,9 +175,8 @@ def main():
 
         r_f = score(full_model, tokz, sdev, te)
 
-        for name, r in [("human400", r_h), ("synth400", r_s),
-                        ("synth400+cal", r_sc), ("synthfull", r_f)]:
-            rows.append({"fold": k, "condition": name, "n_train": n_tr, **r})
+        for name, r in [("human400", r_h), ("synth400", r_s), ("synth400+cal", r_sc), ("synthfull", r_f)]:
+            rows.append({"fold": k, "condition": name, "n_train": len(synth) if name == "synthfull" else n_tr, **r})
             print(f"    {name:13s} microF1 {r['micro_f1']*100:6.2f}  "
                   f"macroF1 {r['macro_f1']*100:6.2f}  ALERT {r['alert_micro_f1']*100:6.2f}")
 

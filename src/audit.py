@@ -15,6 +15,7 @@ from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import (KFold, StratifiedKFold, cross_val_predict)
 from scipy.sparse import csr_matrix, hstack
+from sklearn.pipeline import make_pipeline
 
 from src.config import DATA, RESULTS
 
@@ -87,31 +88,77 @@ def main():
 
     # ---- F4: where the text signal is --------------------------------------
     print("\n[F4] signal location (5-fold CV AUROC on original binary label)")
-    V = TfidfVectorizer(min_df=3, max_features=20000, ngram_range=(1, 2), sublinear_tf=True)
-    Xs = V.fit_transform([r["seek"] for r in es])
-    Xp = TfidfVectorizer(min_df=3, max_features=20000, ngram_range=(1, 2),
-                         sublinear_tf=True).fit_transform([r["supp"] for r in es])
-    for nm, X in [("seeker text", Xs), ("supporter text", Xp)]:
-        v = auroc_cv(X, y)
+
+    def tfidf_auroc_cv(texts, y, seed=13):
+        pipe = make_pipeline(
+            TfidfVectorizer(
+                min_df=3,
+                max_features=20000,
+                ngram_range=(1, 2),
+                sublinear_tf=True,
+            ),
+            LogisticRegression(max_iter=3000),
+        )
+        p = cross_val_predict(
+            pipe,
+            texts,
+            y,
+            cv=StratifiedKFold(5, shuffle=True, random_state=seed),
+            method="predict_proba",
+        )[:, 1]
+        return float(roc_auc_score(y, p))
+
+    seeker_texts = [r["seek"] for r in es]
+    supporter_texts = [r["supp"] for r in es]
+
+    for nm, texts in [
+        ("seeker text", seeker_texts),
+        ("supporter text", supporter_texts),
+    ]:
+        v = tfidf_auroc_cv(texts, y)
         print(f"  {nm:24s} {v:.4f}")
         OUT[f"F4_{nm.replace(' ', '_')}"] = v
-    a_both = auroc_cv(hstack([Xs, csr_matrix(init.reshape(-1, 1))]).tocsr(), y)
-    print(f"  {'seeker text + intake':24s} {a_both:.4f}   (+{a_both - a_int:.4f} over intake)")
-    OUT["F4_text_plus_intake"] = a_both
 
     # ---- F5: residualised target -------------------------------------------
     print("\n[F5] intake-residualised target  (the clean one)")
-    exp = np.zeros_like(delta)
-    for v in set(init):
-        exp[init == v] = delta[init == v].mean()
-    resid = delta - exp
-    print(f"  corr(residual, intake) = {np.corrcoef(resid, init)[0, 1]:+.4f}  (sanity: ~0)")
-    pr = cross_val_predict(Ridge(alpha=1.0), Xs, resid, cv=KFold(5, shuffle=True, random_state=13))
-    rho = float(spearmanr(resid, pr).statistic)
+
+    cv = KFold(5, shuffle=True, random_state=13)
+    pred = np.zeros(len(delta))
+    resid = np.zeros(len(delta))
+
+    for tr, te in cv.split(delta):
+        exp_tr = {
+            v: delta[tr][init[tr] == v].mean()
+            for v in np.unique(init[tr])
+        }
+
+        r_tr = delta[tr] - np.array([exp_tr[v] for v in init[tr]])
+        r_te = delta[te] - np.array([
+            exp_tr.get(v, delta[tr].mean())
+            for v in init[te]
+        ])
+
+        resid[te] = r_te
+
+        pipe = make_pipeline(
+            TfidfVectorizer(
+                min_df=3,
+                max_features=20000,
+                ngram_range=(1, 2),
+                sublinear_tf=True,
+            ),
+            Ridge(alpha=1.0),
+        )
+        pipe.fit([seeker_texts[i] for i in tr], r_tr)
+        pred[te] = pipe.predict([seeker_texts[i] for i in te])
+
+    rho = float(spearmanr(resid, pred).statistic)
     yb = (resid >= np.median(resid)).astype(int)
-    ab = auroc_cv(Xs, yb)
+    ab = tfidf_auroc_cv(seeker_texts, yb)
+
     print(f"  TF-IDF -> residual   Spearman rho = {rho:+.4f}")
     print(f"  TF-IDF -> residual   AUROC (median split) = {ab:.4f}")
+
     OUT["F5_rho"], OUT["F5_auroc"] = rho, ab
 
     RESULTS.mkdir(exist_ok=True, parents=True)
